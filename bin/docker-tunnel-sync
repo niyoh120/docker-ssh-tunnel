@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# docker-tunnel-sync — 节点清单的唯一真源是 Coolify API
+#
+# 手动维护节点列表必然会漂（加一台机器忘了加隧道）。这里直接读 Coolify 的 servers
+# 接口生成每个节点的 env 文件，加节点 = 在 Coolify 里加服务器 + 跑一次 sync。
+#
+# 用法:
+#   docker-tunnel-sync            # dry-run，只打印将要写入/启用的内容
+#   docker-tunnel-sync --apply    # 真正写 env 文件
+#   docker-tunnel-sync --apply --enable   # 写文件并 systemctl enable --now
+set -euo pipefail
+
+NODES_DIR=${NODES_DIR:-/etc/docker-tunnel/nodes}
+SSH_KEY=${SSH_KEY:-/root/.ssh/docker_tunnel_ed25519}
+COOLIFY_CONFIG=${COOLIFY_CONFIG:-/root/.config/coolify/config.json}
+APPLY=no
+ENABLE=no
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=yes ;;
+    --enable) ENABLE=yes ;;
+    *) echo "usage: $0 [--apply] [--enable]" >&2; exit 2 ;;
+  esac
+done
+
+[ "$APPLY" = yes ] && install -d -m 0700 "$NODES_DIR"
+
+python3 - "$NODES_DIR" "$SSH_KEY" "$COOLIFY_CONFIG" "$APPLY" <<'PY'
+import json, os, re, subprocess, sys
+
+nodes_dir, ssh_key, cfg_path, apply_ = sys.argv[1:5]
+
+with open(cfg_path) as f:
+    cfg = json.load(f)
+home = [i for i in cfg["instances"] if i.get("default")][0]
+token, fqdn = home["token"], home["fqdn"]
+
+req = subprocess.run(
+    ["curl", "-s", "-H", f"Authorization: Bearer {token}",
+     "-H", "Accept: application/json", f"{fqdn}/api/v1/servers"],
+    capture_output=True, text=True, timeout=30)
+servers = json.loads(req.stdout)
+
+enable_cmds, skipped = [], []
+for s in sorted(servers, key=lambda x: x.get("name", "")):
+    name = re.sub(r"[^A-Za-z0-9_.-]", "-", s.get("name") or "")
+    host, port, user = s.get("ip"), s.get("port") or 22, s.get("user") or "root"
+
+    # Coolify 自身的 localhost 条目指向 host.docker.internal，从别的机器解析不了
+    if not host or "host.docker.internal" in host:
+        skipped.append((name, host, "Coolify 本体/不可解析地址，跳过"))
+        continue
+
+    body = f"SSH_USER={user}\nSSH_HOST={host}\nSSH_PORT={port}\nSSH_KEY={ssh_key}\n"
+    path = os.path.join(nodes_dir, f"{name}.env")
+    if apply_ == "yes":
+        with open(path, "w") as f:
+            f.write(body)
+        os.chmod(path, 0o600)
+        print(f"[write] {path}\n{body}")
+    else:
+        print(f"[dry-run] would write {path}\n{body}")
+    enable_cmds.append(f"systemctl enable --now docker-tunnel@{name}.service")
+
+for name, host, why in skipped:
+    print(f"[skip] {name} ({host}) — {why}")
+
+print("\n启用命令（target 里也要加 Wants=，或直接用各自的 enable）:")
+for c in enable_cmds:
+    print("  " + c)
+print("\n注意：SSH_KEY 指向的密钥需要先在每个节点的 authorized_keys 里授权。")
+PY
+
+if [ "$ENABLE" = yes ]; then
+  for f in "$NODES_DIR"/*.env; do
+    node=$(basename "$f" .env)
+    systemctl enable --now "docker-tunnel@${node}.service"
+  done
+  systemctl start docker-tunnel.target
+fi

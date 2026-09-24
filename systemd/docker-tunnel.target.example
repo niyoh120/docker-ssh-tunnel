@@ -1,0 +1,17 @@
+[Unit]
+Description=Docker tunnel fleet (all docker-tunnel@*.service instances)
+Documentation=file:///etc/docker-tunnel/README.md
+#Wants=docker-tunnel@node-a.service
+#Wants=docker-tunnel@node-b.service
+#Wants=docker-tunnel@node-a.service
+#Wants=docker-tunnel@node-b.service
+#Wants=docker-tunnel@node-a.service
+#Wants=docker-tunnel@node-b.service
+#Wants=docker-tunnel@node-a.service
+#Wants=docker-tunnel@node-b.service
+#Wants=docker-tunnel@node-a.service
+#Wants=docker-tunnel@node-b.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

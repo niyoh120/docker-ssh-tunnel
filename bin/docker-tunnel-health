@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# docker-tunnel-health — 隧道端到端健康检查
+#
+# 为什么不只看 systemctl is-active：
+#   ssh -N 进程活着不代表隧道可用（半开连接、远端 dockerd 挂了都会表现为"unit active 但不可用"）。
+#   只有从 socket 里真的问出 dockerd 版本，才算这条隧道健康。
+#
+# 用法:
+#   docker-tunnel-health            # 只检查
+#   docker-tunnel-health --heal     # 检查并自动重启不可达的隧道
+#   docker-tunnel-health --json     # 输出 JSON（给检查服务/监控吃）
+set -uo pipefail
+
+NODES_DIR=${NODES_DIR:-/etc/docker-tunnel/nodes}
+RUN_DIR=${RUN_DIR:-/run/docker-tunnels}
+TIMEOUT=${TIMEOUT:-5}
+MODE=check
+case "${1:-}" in
+  --heal) MODE=heal ;;
+  --json) MODE=json ;;
+  "") ;;
+  *) echo "usage: $0 [--heal|--json]" >&2; exit 2 ;;
+esac
+
+shopt -s nullglob
+envfiles=("$NODES_DIR"/*.env)
+if [ ${#envfiles[@]} -eq 0 ]; then
+  echo "no node env files in $NODES_DIR — run docker-tunnel-sync first" >&2
+  exit 2
+fi
+
+fail=0
+[ "$MODE" = json ] || printf '%-16s %-10s %-8s %-12s %s\n' NODE UNIT SOCKET DOCKER REMOTE
+json_out="["
+for f in "${envfiles[@]}"; do
+  node=$(basename "$f" .env)
+  unit="docker-tunnel@${node}.service"
+  sock="$RUN_DIR/${node}.sock"
+
+  state=$(systemctl is-active "$unit" 2>/dev/null || true)
+  if [ -S "$sock" ]; then sockurl="unix://$sock"; sockst=ok; else sockurl="unix:///nonexistent"; sockst=missing; fi
+
+  ver=$(timeout "$TIMEOUT" docker -H "$sockurl" version --format '{{.Server.Version}}' 2>/dev/null || true)
+  healthy=true
+  if [ -z "$ver" ]; then
+    healthy=false; fail=1; ver="UNREACHABLE"
+    if [ "$MODE" = heal ] && systemctl restart "$unit" >/dev/null 2>&1; then
+      sleep 3
+      retry=$(timeout "$TIMEOUT" docker -H "$sockurl" version --format '{{.Server.Version}}' 2>/dev/null || true)
+      [ -n "$retry" ] && { ver="$retry"; healthy=true; fail=0; }
+    fi
+  fi
+
+  # 远端主机名/地址，便于人肉判断是哪个节点
+  remote=$(sed -n 's/^SSH_HOST=//p' "$f")
+
+  if [ "$MODE" = json ]; then
+    json_out+="{\"node\":\"$node\",\"unit\":\"$unit\",\"unit_state\":\"$state\",\"socket\":\"$sockst\",\"docker\":\"$ver\",\"remote\":\"$remote\",\"healthy\":$healthy},"
+  else
+    printf '%-16s %-10s %-8s %-12s %s\n' "$node" "$state" "$sockst" "$ver" "$remote"
+  fi
+done
+
+if [ "$MODE" = json ]; then
+  echo "${json_out%,}]"
+else
+  echo
+  if [ $fail -eq 0 ]; then echo "all tunnels healthy"; else echo "!! some tunnels UNREACHABLE — 检查服务的正确行为是跳过该节点，而不是当作容器消失"; fi
+fi
+exit $fail

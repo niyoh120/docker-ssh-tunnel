@@ -1,0 +1,44 @@
+# Example: a consumer (WUD) plus one tunnel container per node.
+# Copy the node env files to ./nodes/ and the private key to ./keys/id_ed25519.
+
+x-tunnel: &tunnel
+  image: ghcr.io/niyoh120/docker-ssh-tunnel:latest
+  restart: unless-stopped
+  environment:
+    TUNNEL_MODE: tcp
+    LOCAL_PORT: "2375"
+    SSH_KEY: /root/.ssh/id_ed25519
+  volumes:
+    - ./nodes:/etc/docker-tunnel/nodes:ro
+    - ./keys/id_ed25519:/root/.ssh/id_ed25519:ro   # mount the key, never bake it into the image
+  expose:
+    - "2375"          # reachable inside this compose network only — do not publish it
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/docker-tunnel-healthcheck"]
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 30s
+
+services:
+  # ── the consumer: any tool that needs remote Docker endpoints ──
+  wud:
+    image: getwud/wud:latest
+    restart: unless-stopped
+    environment:
+      # one watcher per tunnel; HOST is the compose service name, PORT the forwarded port
+      WUD_WATCHER_NODEA_HOST: tunnel-node-a
+      WUD_WATCHER_NODEA_PORT: "2375"
+      WUD_WATCHER_NODEB_HOST: tunnel-node-b
+      WUD_WATCHER_NODEB_PORT: "2375"
+    expose:
+      - "3000"
+
+  # ── one container per node ──
+  tunnel-node-a:
+    <<: *tunnel
+    command: ["node-a"]
+
+  tunnel-node-b:
+    <<: *tunnel
+    command: ["node-b"]

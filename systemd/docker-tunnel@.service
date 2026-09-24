@@ -1,0 +1,42 @@
+[Unit]
+Description=Docker socket tunnel to %i
+Documentation=file:///etc/docker-tunnel/README.md
+After=network-online.target
+Wants=network-online.target
+PartOf=docker-tunnel.target
+# 节点重启/网络抖动时不放弃：永不触发 start-limit
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/docker-tunnel/nodes/%i.env
+
+# /run 是 tmpfs，重启后自然清空；这里再兜一次防止 unit 重启留下陈旧 socket
+ExecStartPre=/usr/bin/install -d -m 0700 /run/docker-tunnels
+ExecStartPre=-/usr/bin/rm -f /run/docker-tunnels/%i.sock
+
+# 关键三个 ssh 选项：
+#   ExitOnForwardFailure  socket 绑不上就直接退出（交给 systemd 重启），不留下"活着但没用"的会话
+#   StreamLocalBindUnlink 允许覆盖残留 socket
+#   ServerAliveInterval    半开连接（网络断了但 TCP 还没超时）能在 ~45s 内被发现并重建
+ExecStart=/usr/bin/ssh -NT \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o StreamLocalBindUnlink=yes \
+    -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=3 \
+    -o TCPKeepAlive=yes \
+    -o ConnectTimeout=10 \
+    -i ${SSH_KEY} \
+    -p ${SSH_PORT} \
+    -L /run/docker-tunnels/%i.sock:/var/run/docker.sock \
+    ${SSH_USER}@${SSH_HOST}
+
+Restart=always
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=5
+SyslogIdentifier=docker-tunnel-%i
+
+[Install]
+WantedBy=docker-tunnel.target
