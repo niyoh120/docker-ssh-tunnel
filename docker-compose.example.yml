@@ -8,6 +8,11 @@ x-tunnel: &tunnel
     TUNNEL_MODE: tcp
     LOCAL_PORT: "2375"
     SSH_KEY: /root/.ssh/id_ed25519
+    # >0 = retry inside the container with exponential backoff (30→60→120→300s max).
+    # Keeps the container alive so its logs stay readable, and keeps failed auth
+    # attempts rare enough not to trip the remote sshd's fail2ban.
+    # Set to 0 to exit instead and let the orchestrator's restart policy handle it.
+    RETRY_DELAY: "30"
   volumes:
     - ./nodes:/etc/docker-tunnel/nodes:ro
     - ./keys/id_ed25519:/root/.ssh/id_ed25519:ro   # mount the key, never bake it into the image

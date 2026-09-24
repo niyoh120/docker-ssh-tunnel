@@ -59,21 +59,46 @@ fi
 
 echo "[docker-tunnel] node=$NODE mode=$TUNNEL_MODE user=$SSH_USER@$SSH_HOST:$SSH_PORT key=$SSH_KEY"
 
-# ExitOnForwardFailure : socket/端口绑不上就退出（交给 docker restart 策略），不留"活着但不转发"的假活会话
+# ExitOnForwardFailure : socket/端口绑不上就退出，不留"活着但不转发"的假活会话
 # StreamLocalBindUnlink: 允许覆盖残留 socket
 # ServerAlive*         : 半开连接 ~45s 内被发现并重建
+SSH_OPTS="-N -T -o BatchMode=yes \
+-o ExitOnForwardFailure=yes \
+-o StreamLocalBindUnlink=yes \
+-o ServerAliveInterval=15 \
+-o ServerAliveCountMax=3 \
+-o TCPKeepAlive=yes \
+-o ConnectTimeout=10 \
+-o StrictHostKeyChecking=accept-new \
+-o UserKnownHostsFile=/root/.ssh/known_hosts \
+-i $SSH_KEY \
+-p $SSH_PORT"
+
+# 失败后的重试策略（RETRY_DELAY=0 则直接退出，交给编排层 restart 策略）：
+#   容器内重试的价值不只是"少重启"——闪退容器的日志在编排层基本读不到（docker logs 只对
+#   运行中的容器可查），而对端 sshd 的 fail2ban 会按"每分钟一次"的失败频率把本机拉黑。
+#   退避到分钟级后，既保住日志可读性，也把失败频率压到封禁阈值以下。
+RETRY_DELAY=${RETRY_DELAY:-30}
+MAX_DELAY=${MAX_DELAY:-300}
+
+if [ "$RETRY_DELAY" -gt 0 ] 2>/dev/null; then
+  delay=$RETRY_DELAY
+  while :; do
+    started=$(date +%s)
+    set +e
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS $FORWARD "$SSH_USER@$SSH_HOST"
+    rc=$?
+    set -e
+    elapsed=$(( $(date +%s) - started ))
+    # 会话稳定存活过一段时间 → 重置退避，避免偶发抖动后一直用最大间隔
+    if [ "$elapsed" -ge 300 ]; then delay=$RETRY_DELAY; fi
+    echo "[docker-tunnel] ssh 退出 rc=$rc（会话存活 ${elapsed}s），${delay}s 后重试"
+    sleep "$delay"
+    delay=$(( delay * 2 ))
+    [ "$delay" -gt "$MAX_DELAY" ] && delay=$MAX_DELAY
+  done
+fi
+
 # shellcheck disable=SC2086
-exec ssh -NT \
-  -o BatchMode=yes \
-  -o ExitOnForwardFailure=yes \
-  -o StreamLocalBindUnlink=yes \
-  -o ServerAliveInterval=15 \
-  -o ServerAliveCountMax=3 \
-  -o TCPKeepAlive=yes \
-  -o ConnectTimeout=10 \
-  -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile=/root/.ssh/known_hosts \
-  -i "$SSH_KEY" \
-  -p "$SSH_PORT" \
-  $FORWARD \
-  "$SSH_USER@$SSH_HOST"
+exec ssh $SSH_OPTS $FORWARD "$SSH_USER@$SSH_HOST"
