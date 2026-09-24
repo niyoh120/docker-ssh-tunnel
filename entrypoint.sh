@@ -22,6 +22,18 @@ TUNNEL_MODE=${TUNNEL_MODE:-tcp}
 LOCAL_PORT=${LOCAL_PORT:-2375}
 SOCKET_DIR=${SOCKET_DIR:-/tunnels}
 
+# 密钥可以走文件，也可以走环境变量 —— 环境变量形式省掉在平台侧挂载文件（Coolify/compose 等
+# 只需注入一个变量即可）。SSH_KEY_B64 优先，写入后立即降到 0600。
+if [ -n "${SSH_KEY_B64:-}" ]; then
+  SSH_KEY=/tmp/tunnel_key
+  umask 077
+  printf '%s' "$SSH_KEY_B64" | base64 -d > "$SSH_KEY" 2>/dev/null \
+    || { echo "SSH_KEY_B64 is not valid base64" >&2; exit 1; }
+  chmod 600 "$SSH_KEY"
+  grep -q 'BEGIN .*PRIVATE KEY' "$SSH_KEY" 2>/dev/null \
+    || { echo "SSH_KEY_B64 does not decode to a private key" >&2; exit 1; }
+fi
+
 [ -r "$SSH_KEY" ] || { echo "SSH key not readable: $SSH_KEY" >&2; exit 1; }
 
 case "$TUNNEL_MODE" in
